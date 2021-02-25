@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 
 import rospy
+
+# messages
 from geometry_msgs.msg import PoseStamped
 from styx_msgs.msg import Lane, Waypoint
+from std_msgs.msg import Int32
 
+# Other
 import math
+import numpy as np
+from scipy.spatial import KDTree
 
 '''
 This node will publish waypoints from the car's current position to some `x` distance ahead.
@@ -32,21 +38,61 @@ class WaypointUpdater(object):
         rospy.Subscriber('/base_waypoints', Lane, self.waypoints_cb)
 
         # TODO: Add a subscriber for /traffic_waypoint and /obstacle_waypoint below
-
+        # rospy.Subscriber('/traffic_waypoint', Int32, self.traffic_cb)
+        # rospy.Subscriber('/obstacle_waypoint', ??, self.obstacle_cb)
 
         self.final_waypoints_pub = rospy.Publisher('final_waypoints', Lane, queue_size=1)
 
-        # TODO: Add other member variables you need below
+        # Member variables
+        self.pose = None
+        self.base_waypoints = None
+        self.waypoints_2d = None
+        self.waypoint_tree = None
 
-        rospy.spin()
+        rospy.loginfo('WaypointUpdater: done initializing')
 
-    def pose_cb(self, msg):
-        # TODO: Implement
-        pass
+    def loop(self):
+        rate = rospy.Rate(50)
+        rospy.loginfo('WaypointUpdater: starting loop')
+        while not rospy.is_shutdown():
+            if self.pose and self.base_waypoints:
+                #Get closest waypoint
+                next_idx = self.get_next_waypoint_idx()
+                self.publish_waypoints(next_idx)
+            rate.sleep()
+
+    def get_next_waypoint_idx(self):
+        x = self.pose.pose.position.x
+        y = self.pose.pose.position.y
+        next_idx = self.waypoint_tree.query([x,y], 1)[1]
+
+        pos = np.array([x, y])
+        closest_pos = np.array(self.waypoints_2d[next_idx])
+        prev_pos = np.array(self.waypoints_2d[next_idx-1])
+
+        prod = np.dot(closest_pos-prev_pos, pos-closest_pos)
+
+        if (0 < prod):
+            next_idx = (next_idx + 1) % len(self.waypoints_2d)
+
+        return next_idx
+
+    def publish_waypoints(self, next_idx):
+        lane = Lane()
+        lane.header = self.base_waypoints.header
+        lane.waypoints = self.base_waypoints.waypoints[next_idx:next_idx + LOOKAHEAD_WPS]
+        #rospy.loginfo('WaypointUpdater: publish final waypoints')
+        self.final_waypoints_pub.publish(lane)
+
+    def pose_cb(self, pose_msg):
+        self.pose = pose_msg
 
     def waypoints_cb(self, waypoints):
-        # TODO: Implement
-        pass
+        self.base_waypoints = waypoints
+        # rospy.loginfo('WaypointUpdater: received base waypoints')
+        if not self.waypoints_2d:
+            self.waypoints_2d = [[w.pose.pose.position.x, w.pose.pose.position.y] for w in waypoints.waypoints]
+            self.waypoint_tree = KDTree(self.waypoints_2d)
 
     def traffic_cb(self, msg):
         # TODO: Callback for /traffic_waypoint message. Implement
@@ -73,6 +119,8 @@ class WaypointUpdater(object):
 
 if __name__ == '__main__':
     try:
-        WaypointUpdater()
+        waypoint_updater = WaypointUpdater()
+        waypoint_updater.loop()
+
     except rospy.ROSInterruptException:
         rospy.logerr('Could not start waypoint updater node.')
