@@ -51,11 +51,16 @@ class WaypointUpdater(object):
 
         rospy.loginfo('WaypointUpdater: done initializing')
 
+        self.loop()
+
     def loop(self):
         rate = rospy.Rate(50)
         rospy.loginfo('WaypointUpdater: starting loop')
         while not rospy.is_shutdown():
-            if self.pose and self.base_waypoints:
+            if (self.pose is not None and
+                self.base_waypoints is not None
+                and self.waypoints_2d is not None and
+                self.waypoint_tree is not None):
                 #Get closest waypoint
                 next_idx = self.get_next_waypoint_idx()
                 self.publish_waypoints(next_idx)
@@ -81,6 +86,9 @@ class WaypointUpdater(object):
         lane = Lane()
         lane.header = self.base_waypoints.header
         lane.waypoints = self.base_waypoints.waypoints[next_idx:next_idx + LOOKAHEAD_WPS]
+
+        # rospy.loginfo('waypoints: next: %u, lookahead: % u, total: % u', next_idx, LOOKAHEAD_WPS, len(self.base_waypoints.waypoints))
+
         #rospy.loginfo('WaypointUpdater: publish final waypoints')
         self.final_waypoints_pub.publish(lane)
 
@@ -120,7 +128,6 @@ class WaypointUpdater(object):
 if __name__ == '__main__':
     try:
         waypoint_updater = WaypointUpdater()
-        waypoint_updater.loop()
 
     except rospy.ROSInterruptException:
         rospy.logerr('Could not start waypoint updater node.')
