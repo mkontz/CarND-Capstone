@@ -38,10 +38,13 @@ class WaypointUpdater(object):
         rospy.Subscriber('/base_waypoints', Lane, self.waypoints_cb)
 
         # TODO: Add a subscriber for /traffic_waypoint and /obstacle_waypoint below
-        # rospy.Subscriber('/traffic_waypoint', Int32, self.traffic_cb)
+        rospy.Subscriber('/traffic_waypoint', Int32, self.traffic_cb)
         # rospy.Subscriber('/obstacle_waypoint', ??, self.obstacle_cb)
 
         self.final_waypoints_pub = rospy.Publisher('final_waypoints', Lane, queue_size=1)
+
+        self.target_decel = rospy.get_param('~target_decel')
+        self.max_decel = rospy.get_param('~max_decel')
 
         # Member variables
         self.pose = None
@@ -49,21 +52,17 @@ class WaypointUpdater(object):
         self.waypoints_2d = None
         self.waypoint_tree = None
 
+        self.i_stop = -1
+
         rospy.loginfo('WaypointUpdater: done initializing')
 
         self.loop()
 
     def loop(self):
-        rate = rospy.Rate(50)
+        rate = rospy.Rate(1)
         rospy.loginfo('WaypointUpdater: starting loop')
         while not rospy.is_shutdown():
-            if (self.pose is not None and
-                self.base_waypoints is not None
-                and self.waypoints_2d is not None and
-                self.waypoint_tree is not None):
-                #Get closest waypoint
-                next_idx = self.get_next_waypoint_idx()
-                self.publish_waypoints(next_idx)
+            self.publish_waypoints()
             rate.sleep()
 
     def get_next_waypoint_idx(self):
@@ -82,29 +81,51 @@ class WaypointUpdater(object):
 
         return next_idx
 
-    def publish_waypoints(self, next_idx):
-        lane = Lane()
-        lane.header = self.base_waypoints.header
-        lane.waypoints = self.base_waypoints.waypoints[next_idx:next_idx + LOOKAHEAD_WPS]
+    def publish_waypoints(self):
+        if (self.pose is not None and self.base_waypoints is not None and
+            self.waypoints_2d is not None and self.waypoint_tree is not None):
 
-        # rospy.loginfo('waypoints: next: %u, lookahead: % u, total: % u', next_idx, LOOKAHEAD_WPS, len(self.base_waypoints.waypoints))
+            next_idx = self.get_next_waypoint_idx()
 
-        #rospy.loginfo('WaypointUpdater: publish final waypoints')
-        self.final_waypoints_pub.publish(lane)
+            lane = Lane()
+            lane.header = self.base_waypoints.header
+
+            # if (self.i_stop < 0)
+
+            wrap_around = LOOKAHEAD_WPS - (len(self.base_waypoints.waypoints) - next_idx)
+            if 0 < wrap_around:
+                lane.waypoints = self.base_waypoints.waypoints[next_idx : ] + self.base_waypoints.waypoints[ : wrap_around]
+            else:
+                lane.waypoints =self.base_waypoints.waypoints[next_idx : next_idx + LOOKAHEAD_WPS]
+
+            # # decel at end of points incase communication is lost.
+            # lane.waypoints = self.decelerate(lane.waypoints, self.target_decel)
+
+            self.final_waypoints_pub.publish(lane)
 
     def pose_cb(self, pose_msg):
         self.pose = pose_msg
 
     def waypoints_cb(self, waypoints):
-        self.base_waypoints = waypoints
-        # rospy.loginfo('WaypointUpdater: received base waypoints')
-        if not self.waypoints_2d:
+        if self.waypoints_2d is None:
+            self.base_waypoints = waypoints
             self.waypoints_2d = [[w.pose.pose.position.x, w.pose.pose.position.y] for w in waypoints.waypoints]
             self.waypoint_tree = KDTree(self.waypoints_2d)
 
+            # remove decel ramp at end of waypoints
+            target_spd = self.base_waypoints.waypoints[0].twist.twist.linear.x
+            i = len(self.base_waypoints.waypoints) - 1
+            while (0 < i) and (self.base_waypoints.waypoints[i].twist.twist.linear.x < target_spd):
+                rospy.loginfo('i: %u, spd: %f, target: %f', i, self.base_waypoints.waypoints[i].twist.twist.linear.x, target_spd)
+                self.base_waypoints.waypoints[i].twist.twist.linear.x = target_spd
+                i -= 1
+
     def traffic_cb(self, msg):
-        # TODO: Callback for /traffic_waypoint message. Implement
-        pass
+        if self.i_stop != msg.data:
+            self.i_stop = msg.data
+
+            # publish new waypoints
+            # self.publish_waypoints()
 
     def obstacle_cb(self, msg):
         # TODO: Callback for /obstacle_waypoint message. We will implement it later
@@ -119,10 +140,28 @@ class WaypointUpdater(object):
     def distance(self, waypoints, wp1, wp2):
         dist = 0
         dl = lambda a, b: math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2  + (a.z-b.z)**2)
-        for i in range(wp1, wp2+1):
-            dist += dl(waypoints[wp1].pose.pose.position, waypoints[i].pose.pose.position)
-            wp1 = i
+        for i in range(wp1, wp2):
+            dist += dl(waypoints[i].pose.pose.position, waypoints[i+1].pose.pose.position)
         return dist
+
+    def distanceL2(self, waypoints, wp1, wp2):
+        dl = lambda a, b: math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2  + (a.z-b.z)**2)
+        return dl(waypoints[wp1].pose.pose.position, waypoints[wp2].pose.pose.position)
+
+    def decelerate(self, waypoints, decel):
+        waypoints[-1].twist.twist.linear.x = 0.
+        i_last = len(waypoints) - 1
+        i = i_last - 1
+        while (0 <= i):
+            vel = math.sqrt(2 * decel * self.distance(waypoints, i, i_last))
+            if (vel < waypoints[i].twist.twist.linear.x):
+                rospy.loginfo("Setting vel %u = %f", i, vel)
+                waypoints[i].twist.twist.linear.x = vel
+                i -= 1
+            else:
+                break
+
+        return waypoints
 
 
 if __name__ == '__main__':
