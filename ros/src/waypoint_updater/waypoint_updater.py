@@ -43,9 +43,6 @@ class WaypointUpdater(object):
 
         self.final_waypoints_pub = rospy.Publisher('final_waypoints', Lane, queue_size=1)
 
-        self.target_decel = rospy.get_param('~target_decel')
-        self.max_decel = rospy.get_param('~max_decel')
-
         # Member variables
         self.pose = None
         self.base_waypoints = None
@@ -53,13 +50,15 @@ class WaypointUpdater(object):
         self.waypoint_tree = None
 
         self.i_stop = -1
+        # self.target_spd = self.kmph2mps(rospy.get_param('~target_spd'))
+        self.target_decel = rospy.get_param('~target_decel')
 
         rospy.loginfo('WaypointUpdater: done initializing')
 
         self.loop()
 
     def loop(self):
-        rate = rospy.Rate(1)
+        rate = rospy.Rate(50)
         rospy.loginfo('WaypointUpdater: starting loop')
         while not rospy.is_shutdown():
             self.publish_waypoints()
@@ -85,21 +84,24 @@ class WaypointUpdater(object):
         if (self.pose is not None and self.base_waypoints is not None and
             self.waypoints_2d is not None and self.waypoint_tree is not None):
 
-            next_idx = self.get_next_waypoint_idx()
-
             lane = Lane()
             lane.header = self.base_waypoints.header
 
-            # if (self.i_stop < 0)
+            # default waypoints
+            i_next = self.get_next_waypoint_idx()
+            i_last = (i_next + LOOKAHEAD_WPS) % len(self.base_waypoints.waypoints)
 
-            wrap_around = LOOKAHEAD_WPS - (len(self.base_waypoints.waypoints) - next_idx)
-            if 0 < wrap_around:
-                lane.waypoints = self.base_waypoints.waypoints[next_idx : ] + self.base_waypoints.waypoints[ : wrap_around]
+            # Check for red light in range
+            if (0 <= self.i_stop) and  ((self.i_stop - i_next) % len(self.base_waypoints.waypoints) < LOOKAHEAD_WPS):
+                i_last = self.i_stop
+
+            if i_next < i_last:
+                lane.waypoints = self.base_waypoints.waypoints[i_next : i_last]
             else:
-                lane.waypoints =self.base_waypoints.waypoints[next_idx : next_idx + LOOKAHEAD_WPS]
+                lane.waypoints = self.base_waypoints.waypoints[i_next : ] + self.base_waypoints.waypoints[0 : i_last]
 
-            # # decel at end of points incase communication is lost.
-            # lane.waypoints = self.decelerate(lane.waypoints, self.target_decel)
+            # alway deceleration at the end of waypoints
+            lane.waypoints = self.decelerate(lane.waypoints)
 
             self.final_waypoints_pub.publish(lane)
 
@@ -112,20 +114,10 @@ class WaypointUpdater(object):
             self.waypoints_2d = [[w.pose.pose.position.x, w.pose.pose.position.y] for w in waypoints.waypoints]
             self.waypoint_tree = KDTree(self.waypoints_2d)
 
-            # remove decel ramp at end of waypoints
-            target_spd = self.base_waypoints.waypoints[0].twist.twist.linear.x
-            i = len(self.base_waypoints.waypoints) - 1
-            while (0 < i) and (self.base_waypoints.waypoints[i].twist.twist.linear.x < target_spd):
-                rospy.loginfo('i: %u, spd: %f, target: %f', i, self.base_waypoints.waypoints[i].twist.twist.linear.x, target_spd)
-                self.base_waypoints.waypoints[i].twist.twist.linear.x = target_spd
-                i -= 1
-
+            self.target_spd = max([w.twist.twist.linear.x for w in waypoints.waypoints])
+ 
     def traffic_cb(self, msg):
-        if self.i_stop != msg.data:
-            self.i_stop = msg.data
-
-            # publish new waypoints
-            # self.publish_waypoints()
+        self.i_stop = msg.data
 
     def obstacle_cb(self, msg):
         # TODO: Callback for /obstacle_waypoint message. We will implement it later
@@ -144,22 +136,14 @@ class WaypointUpdater(object):
             dist += dl(waypoints[i].pose.pose.position, waypoints[i+1].pose.pose.position)
         return dist
 
-    def distanceL2(self, waypoints, wp1, wp2):
-        dl = lambda a, b: math.sqrt((a.x-b.x)**2 + (a.y-b.y)**2  + (a.z-b.z)**2)
-        return dl(waypoints[wp1].pose.pose.position, waypoints[wp2].pose.pose.position)
-
-    def decelerate(self, waypoints, decel):
-        waypoints[-1].twist.twist.linear.x = 0.
-        i_last = len(waypoints) - 1
-        i = i_last - 1
-        while (0 <= i):
-            vel = math.sqrt(2 * decel * self.distance(waypoints, i, i_last))
-            if (vel < waypoints[i].twist.twist.linear.x):
-                rospy.loginfo("Setting vel %u = %f", i, vel)
-                waypoints[i].twist.twist.linear.x = vel
-                i -= 1
+    def decelerate(self, waypoints):
+        k_last = len(waypoints) - 1
+        for k in range(len(waypoints)):
+            if (k < k_last - 1):
+                vel = math.sqrt(2 * self.target_decel * self.distance(waypoints, k, k_last-1))
+                self.set_waypoint_velocity(waypoints, k, min(vel, self.target_spd))
             else:
-                break
+                self.set_waypoint_velocity(waypoints, k, 0.0)
 
         return waypoints
 
